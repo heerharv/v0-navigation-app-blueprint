@@ -11,13 +11,19 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const url = `https://router.project-osrm.org/route/v1/${profile}/${start};${end}?overview=full&geometries=geojson&alternatives=true&steps=true`
+    const osrmProfile = profile === "foot" ? "foot" : profile === "bike" ? "bike" : "driving"
+    const url = `https://router.project-osrm.org/route/v1/${osrmProfile}/${start};${end}?overview=full&geometries=geojson&steps=true`
 
     const response = await fetch(url, {
       headers: {
         "User-Agent": "CarbonAwareNavigationApp/1.0",
       },
     })
+
+    if (!response.ok) {
+      console.error("[v0] OSRM API error:", response.status)
+      return NextResponse.json({ error: "OSRM API error", code: "Error" }, { status: response.status })
+    }
 
     const data = await response.json()
 

@@ -23,11 +23,20 @@ export default function NavigationApp() {
     emissions: 20,
   })
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null)
+  const [locationLoading, setLocationLoading] = useState(false)
 
   useEffect(() => {
     if (navigator.geolocation) {
+      setLocationLoading(true)
+
+      const timeoutId = setTimeout(() => {
+        setLocationLoading(false)
+        console.log("Geolocation taking too long, continuing without it")
+      }, 15000)
+
       navigator.geolocation.getCurrentPosition(
         async (position) => {
+          clearTimeout(timeoutId)
           const { latitude, longitude } = position.coords
           setUserLocation({ lat: latitude, lng: longitude })
 
@@ -35,6 +44,7 @@ export default function NavigationApp() {
           try {
             const response = await fetch(
               `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`,
+              { signal: AbortSignal.timeout(5000) },
             )
             const data = await response.json()
 
@@ -44,17 +54,31 @@ export default function NavigationApp() {
               setOrigin(`${latitude.toFixed(6)}, ${longitude.toFixed(6)}`)
             }
           } catch (error) {
-            console.error("Reverse geocoding error:", error)
+            console.log("Reverse geocoding skipped, using coordinates")
             setOrigin(`${latitude.toFixed(6)}, ${longitude.toFixed(6)}`)
           }
+          setLocationLoading(false)
         },
         (error) => {
-          console.error("Geolocation error:", error)
+          clearTimeout(timeoutId)
+          setLocationLoading(false)
+
+          // Provide helpful error messages but don't block the user
+          if (error.code === error.PERMISSION_DENIED) {
+            console.log("Location access denied by user")
+          } else if (error.code === error.POSITION_UNAVAILABLE) {
+            console.log("Location information unavailable")
+          } else if (error.code === error.TIMEOUT) {
+            console.log("Location request timed out")
+          }
+
+          // Set a default location or leave blank for manual entry
+          setOrigin("")
         },
         {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 0,
+          enableHighAccuracy: false, // Changed to false for faster response
+          timeout: 15000, // Increased from 10s to 15s
+          maximumAge: 300000, // Accept cached position up to 5 minutes old
         },
       )
     }

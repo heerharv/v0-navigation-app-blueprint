@@ -2,6 +2,9 @@
 
 import { useEffect, useRef, useState } from "react"
 import { Badge } from "@/components/ui/badge"
+import { Button } from "@/components/ui/button"
+import { Card } from "@/components/ui/card"
+import L from "leaflet"
 
 interface MapViewProps {
   origin: string
@@ -14,6 +17,7 @@ interface MapViewProps {
     cost: number
     emissions: number
   }
+  onRoutesFetched?: (routes: any[]) => void
 }
 
 interface SafetyPin {
@@ -25,6 +29,21 @@ interface SafetyPin {
   category: string
 }
 
+interface RouteCoords {
+  start: [number, number]
+  end: [number, number]
+}
+
+interface Route {
+  mode: string
+  path: [number, number][]
+  distance: number
+  duration: number
+  cost: number
+  emissions: number
+  color: string
+}
+
 export function MapView({
   origin,
   destination,
@@ -32,14 +51,21 @@ export function MapView({
   showRoutes,
   userLocation,
   optimizationPrefs,
+  onRoutesFetched,
 }: MapViewProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null)
   const mapRef = useRef<any | null>(null)
-  const [isLoaded, setIsLoaded] = useState(false)
   const markersRef = useRef<any[]>([])
-  const polylinesRef = useRef<any[]>([])
-  const [routeCoords, setRouteCoords] = useState<{ start: [number, number]; end: [number, number] } | null>(null)
+  const routeLayersRef = useRef<any[]>([])
+  const userMarkerRef = useRef<any>(null)
+  const [isLoaded, setIsLoaded] = useState(false)
   const [safetyPins, setSafetyPins] = useState<SafetyPin[]>([])
+  const [routeCoords, setRouteCoords] = useState<RouteCoords | null>(null)
+  const [realTimeLocation, setRealTimeLocation] = useState<{ lat: number; lng: number } | null>(null)
+  const [isTracking, setIsTracking] = useState(false)
+  const watchIdRef = useRef<number | null>(null)
+  const [showBusinessData, setShowBusinessData] = useState(false)
+  const [liveETA, setLiveETA] = useState<string | null>(null)
   const [isLoadingSafety, setIsLoadingSafety] = useState(false)
 
   useEffect(() => {
@@ -61,12 +87,11 @@ export function MapView({
             { type: "transit", color: "#14b8a6", labels: ["Bus Stop", "Metro Station", "Transit Hub"] },
           ]
 
-          // Generate 4-6 points per category distributed around the location
           categories.forEach(({ type, color, labels }) => {
-            const numPoints = 4 + Math.floor(Math.random() * 3) // 4-6 points
+            const numPoints = 4 + Math.floor(Math.random() * 3)
             for (let i = 0; i < numPoints; i++) {
               const angle = (i / numPoints) * 2 * Math.PI
-              const distance = 0.01 + Math.random() * 0.025 // 1-3.5 km roughly
+              const distance = 0.01 + Math.random() * 0.025
               const latOffset = Math.cos(angle) * distance
               const lngOffset = Math.sin(angle) * distance
 
@@ -84,19 +109,17 @@ export function MapView({
           return pins
         }
 
-        // Use fallback data immediately
         const fallbackPins = generateFallbackPins()
         setSafetyPins(fallbackPins)
         setIsLoadingSafety(false)
 
-        // Only use a single, minimal query to avoid timeouts
         setTimeout(async () => {
           try {
-            const radius = 2000 // 2km radius
+            const radius = 2000
             const minimalQuery = `[out:json][timeout:10];(
               node["amenity"="police"](around:${radius},${lat},${lng});
               node["amenity"="hospital"](around:${radius},${lat},${lng});
-            );out body 10;` // Limit to 10 results total
+            );out body 10;`
 
             const response = await fetch("https://overpass-api.de/api/interpreter", {
               method: "POST",
@@ -118,7 +141,6 @@ export function MapView({
                   category: element.tags?.amenity || "other",
                 }))
 
-                // Merge real data with fallback data
                 setSafetyPins([...realPins, ...fallbackPins])
               }
             }
@@ -138,42 +160,62 @@ export function MapView({
   useEffect(() => {
     if (typeof window === "undefined") return
 
-    const cssLink = document.createElement("link")
-    cssLink.rel = "stylesheet"
-    cssLink.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-    cssLink.integrity = "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
-    cssLink.crossOrigin = ""
-    document.head.appendChild(cssLink)
+    const addLeafletStyles = () => {
+      if (!document.querySelector('link[href*="leaflet.css"]')) {
+        const link = document.createElement("link")
+        link.rel = "stylesheet"
+        link.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        link.integrity = "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+        link.crossOrigin = ""
+        document.head.appendChild(link)
+      }
+    }
+    addLeafletStyles()
 
-    const script = document.createElement("script")
-    script.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-    script.integrity = "sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
-    script.crossOrigin = ""
-    script.async = true
+    const initializeMap = () => {
+      if (!mapContainerRef.current || mapRef.current) return
 
-    script.onload = () => {
-      initializeMap()
+      const defaultCenter: [number, number] = userLocation ? [userLocation.lat, userLocation.lng] : [20, 0]
+      const defaultZoom = userLocation ? 13 : 2
+
+      const map = L.map(mapContainerRef.current, {
+        center: defaultCenter,
+        zoom: defaultZoom,
+        zoomControl: true,
+        attributionControl: true,
+      })
+
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+        maxZoom: 19,
+      }).addTo(map)
+
+      mapRef.current = map
+      setIsLoaded(true)
+      console.log("[v0] Map initialized successfully at", defaultCenter, "zoom:", defaultZoom)
     }
 
-    document.head.appendChild(script)
+    setTimeout(initializeMap, 100)
 
     return () => {
-      if (script.parentNode) {
-        script.parentNode.removeChild(script)
-      }
-      if (cssLink.parentNode) {
-        cssLink.parentNode.removeChild(cssLink)
+      if (mapRef.current) {
+        mapRef.current.remove()
+        mapRef.current = null
       }
     }
   }, [])
 
   useEffect(() => {
     if (isLoaded && mapRef.current && userLocation) {
-      const L = (window as any).L
-      if (!L) return
+      mapRef.current.setView([userLocation.lat, userLocation.lng], 13, {
+        animate: true,
+      })
+      console.log("[v0] Map centered on user location", userLocation)
+    }
+  }, [isLoaded, userLocation])
 
-      mapRef.current.setView([userLocation.lat, userLocation.lng], 14)
-
+  useEffect(() => {
+    if (isLoaded && mapRef.current && userLocation) {
       const userIcon = L.divIcon({
         className: "custom-marker",
         html: `<div style="position: relative;">
@@ -192,9 +234,6 @@ export function MapView({
 
   useEffect(() => {
     if (!isLoaded || !mapRef.current || safetyPins.length === 0) return
-
-    const L = (window as any).L
-    if (!L) return
 
     const safetyMarkerCount = markersRef.current.filter((m) => m.options?.safetyPin).length
     if (safetyMarkerCount > 0) {
@@ -223,33 +262,10 @@ export function MapView({
     })
   }, [isLoaded, safetyPins])
 
-  const initializeMap = () => {
-    if (!mapContainerRef.current || mapRef.current) return
-
-    if (typeof window === "undefined" || !(window as any).L) {
-      console.error("[v0] Leaflet not loaded")
-      return
-    }
-
-    const L = (window as any).L
-
-    const map = L.map(mapContainerRef.current).setView([37.7749, -122.4194], 12)
-
-    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-      subdomains: "abcd",
-      maxZoom: 20,
-    }).addTo(map)
-
-    mapRef.current = map
-    setIsLoaded(true)
-  }
-
   useEffect(() => {
     if (!showRoutes || !origin || !destination) return
 
-    const geocodeAddresses = async () => {
+    const geocodeAddresses = async (origin: string, destination: string): Promise<RouteCoords | null> => {
       try {
         console.log("[v0] Starting geocoding for:", { origin, destination })
 
@@ -264,12 +280,12 @@ export function MapView({
             }
           }
 
-          console.log("[v0] Geocoding address (full):", address)
-          let response = await fetch(
-            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=3&addressdetails=1`,
+          console.log("[v0] Geocoding address (exact):", address)
+          const response = await fetch(
+            `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}&limit=5&addressdetails=1&dedupe=0`,
             {
               headers: {
-                "User-Agent": "GreenPath Navigation App/1.0",
+                "User-Agent": "CarbonAwareNav/1.0",
                 Accept: "application/json",
               },
             },
@@ -277,53 +293,19 @@ export function MapView({
 
           if (response.ok) {
             const results = await response.json()
-            console.log("[v0] Full address results:", results.length)
-            if (results.length > 0) return results[0]
-          }
+            console.log("[v0] Exact address results:", results.length)
 
-          const parts = address.split(",").map((p) => p.trim())
-          const cityCountry = parts.slice(-3).join(", ")
-
-          if (cityCountry !== address) {
-            console.log("[v0] Trying simplified address:", cityCountry)
-            await new Promise((resolve) => setTimeout(resolve, 1000))
-
-            response = await fetch(
-              `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cityCountry)}&limit=3&addressdetails=1`,
-              {
-                headers: {
-                  "User-Agent": "GreenPath Navigation App/1.0",
-                  Accept: "application/json",
-                },
-              },
-            )
-
-            if (response.ok) {
-              const results = await response.json()
-              console.log("[v0] Simplified address results:", results.length)
-              if (results.length > 0) return results[0]
-            }
-          }
-
-          const firstPart = parts[0]
-          if (firstPart && firstPart.length > 5) {
-            console.log("[v0] Trying landmark only:", firstPart)
-            await new Promise((resolve) => setTimeout(resolve, 1000))
-
-            response = await fetch(
-              `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(firstPart + ", " + parts.slice(-2).join(", "))}&limit=3&addressdetails=1`,
-              {
-                headers: {
-                  "User-Agent": "GreenPath Navigation App/1.0",
-                  Accept: "application/json",
-                },
-              },
-            )
-
-            if (response.ok) {
-              const results = await response.json()
-              console.log("[v0] Landmark results:", results.length)
-              if (results.length > 0) return results[0]
+            if (results.length > 0) {
+              const specificResult = results.find(
+                (r: any) =>
+                  r.class === "amenity" ||
+                  r.class === "building" ||
+                  r.class === "office" ||
+                  r.type === "restaurant" ||
+                  r.type === "cafe" ||
+                  r.osm_type === "node",
+              )
+              return specificResult || results[0]
             }
           }
 
@@ -331,140 +313,45 @@ export function MapView({
         }
 
         const originData = await geocodeAddress(origin)
-        console.log("[v0] Origin data:", originData)
+        console.log("[v0] Origin geocoded:", originData?.display_name)
 
-        await new Promise((resolve) => setTimeout(resolve, 1500))
+        await new Promise((resolve) => setTimeout(resolve, 1000))
 
         const destData = await geocodeAddress(destination)
-        console.log("[v0] Destination data:", destData)
+        console.log("[v0] Destination geocoded:", destData?.display_name)
 
         if (originData && destData) {
           const startCoords: [number, number] = [Number.parseFloat(originData.lat), Number.parseFloat(originData.lon)]
           const endCoords: [number, number] = [Number.parseFloat(destData.lat), Number.parseFloat(destData.lon)]
 
           console.log("[v0] Route coordinates:", { startCoords, endCoords })
-          setRouteCoords({ start: startCoords, end: endCoords })
+          return { start: startCoords, end: endCoords }
         } else {
           console.error("[v0] Could not geocode addresses - no results found")
           const missingLocation = !originData ? "starting location" : "destination"
-          alert(
-            `Could not find ${missingLocation}. Please try:\n- Using a simpler address (just landmark + city)\n- Selecting from autocomplete suggestions\n- Entering coordinates in "lat, lng" format\n\nExample: "IIT Madras, Chennai" instead of full address`,
-          )
+          alert(`Could not find ${missingLocation}. Please select from the autocomplete suggestions.`)
+          return null
         }
       } catch (error) {
         console.error("[v0] Geocoding error:", error)
-        alert(
-          "Error finding locations. Please try:\n- Simpler addresses (landmark + city)\n- Selecting from autocomplete dropdown\n- Waiting 1-2 minutes if rate limited\n- Entering coordinates directly",
-        )
+        return null
       }
     }
 
-    geocodeAddresses()
+    geocodeAddresses(origin, destination).then((coords) => {
+      if (coords) {
+        setRouteCoords(coords)
+      }
+    })
   }, [showRoutes, origin, destination])
 
   useEffect(() => {
-    if (!isLoaded || !mapRef.current || !routeCoords) return
-
-    if (typeof window === "undefined" || !(window as any).L) return
-
-    const L = (window as any).L
-
-    polylinesRef.current.forEach((polyline) => polyline.remove())
-    polylinesRef.current = []
-
-    const routeMarkers = markersRef.current.filter((m) => !m.options?.safetyPin)
-    routeMarkers.forEach((marker) => marker.remove())
-    markersRef.current = markersRef.current.filter((m) => m.options?.safetyPin)
+    if (!mapRef.current || !routeCoords) return
 
     const { start: startCoords, end: endCoords } = routeCoords
 
-    const fetchRoutes = async (startCoords: [number, number], endCoords: [number, number]) => {
-      const routes: Array<{
-        mode: string
-        path: [number, number][]
-        distance: number
-        duration: number
-        cost: number
-        emissions: number
-        color: string
-      }> = []
-
-      const routeConfigs = [
-        { mode: "walk", profile: "foot", color: "#3b82f6", speed: 5, costPerKm: 0, emissionsPerKm: 0 },
-        { mode: "bike", profile: "bike", color: "#8b5cf6", speed: 15, costPerKm: 0.1, emissionsPerKm: 0 },
-        { mode: "car", profile: "car", color: "#ef4444", speed: 40, costPerKm: 0.5, emissionsPerKm: 120 },
-      ]
-
-      for (const config of routeConfigs) {
-        try {
-          const url = `/api/route?profile=${config.profile}&start=${startCoords[1]},${startCoords[0]}&end=${endCoords[1]},${endCoords[0]}`
-
-          console.log(`[v0] Fetching ${config.mode} route via API`)
-
-          const response = await fetch(url)
-          const data = await response.json()
-
-          if (data.code === "Ok" && data.routes && data.routes.length > 0) {
-            const route = data.routes[0]
-            const coordinates = route.geometry.coordinates.map(
-              (coord: number[]) => [coord[1], coord[0]] as [number, number],
-            )
-
-            const distanceKm = route.distance / 1000
-            const durationMin = route.duration / 60
-
-            routes.push({
-              mode: config.mode,
-              path: coordinates,
-              distance: route.distance,
-              duration: route.duration,
-              cost: distanceKm * config.costPerKm,
-              emissions: distanceKm * config.emissionsPerKm,
-              color: config.color,
-            })
-
-            console.log(
-              `[v0] Fetched ${config.mode} route: ${coordinates.length} points, ${distanceKm.toFixed(1)}km, ${durationMin.toFixed(1)}min`,
-            )
-          } else {
-            console.log(`[v0] No valid route found for ${config.mode}`)
-          }
-        } catch (error) {
-          console.error(`[v0] Error fetching ${config.mode} route:`, error)
-        }
-      }
-
-      if (routes.length === 0) {
-        console.log("[v0] API routing failed, generating estimated routes")
-
-        const straightDistance = calculateDistance(startCoords, endCoords)
-
-        routeConfigs.forEach((config) => {
-          const offset = config.mode === "walk" ? 0.002 : config.mode === "bike" ? -0.002 : 0
-          const midPoint: [number, number] = [
-            (startCoords[0] + endCoords[0]) / 2 + offset,
-            (startCoords[1] + endCoords[1]) / 2 + offset,
-          ]
-
-          const path: [number, number][] = [startCoords, midPoint, endCoords]
-          const multiplier = config.mode === "walk" ? 1.2 : config.mode === "bike" ? 1.25 : 1.4
-          const estimatedDistance = straightDistance * multiplier
-          const estimatedDuration = (estimatedDistance / config.speed) * 3600 // seconds
-
-          routes.push({
-            mode: config.mode,
-            path,
-            distance: estimatedDistance * 1000, // meters
-            duration: estimatedDuration,
-            cost: estimatedDistance * config.costPerKm,
-            emissions: estimatedDistance * config.emissionsPerKm,
-            color: config.color,
-          })
-        })
-      }
-
-      return routes
-    }
+    routeLayersRef.current.forEach((layer) => layer.remove())
+    routeLayersRef.current = []
 
     const drawRoutes = async () => {
       const routes = await fetchRoutes(startCoords, endCoords)
@@ -507,7 +394,7 @@ export function MapView({
             const polyline = L.polyline(route.path, {
               color: route.color,
               opacity: isSelected ? 0.9 : isBestRoute ? 0.7 : 0.4,
-              weight: isSelected ? 6 : isBestRoute ? 4 : 3,
+              weight: isSelected ? 7 : isBestRoute ? 5 : 3,
             }).addTo(mapRef.current)
 
             polyline.bindPopup(
@@ -519,104 +406,301 @@ export function MapView({
                 `Match Score: ${route.score?.toFixed(0)}%`,
             )
 
-            polylinesRef.current.push(polyline)
+            routeLayersRef.current.push(polyline)
           }
         })
-      } else {
-        console.log("[v0] All routes failed, using fallback visualization")
 
-        const midLat = (startCoords[0] + endCoords[0]) / 2
-        const midLng = (startCoords[1] + endCoords[1]) / 2
+        if (onRoutesFetched) {
+          onRoutesFetched(
+            routesWithScores.map((r) => ({
+              mode: r?.mode || "walk",
+              distance: ((r?.distance || 0) / 1000).toFixed(1),
+              duration: `${Math.round((r?.duration || 0) / 60)} min`,
+              cost: `$${(r?.cost || 0).toFixed(2)}`,
+              emissions: `${(r?.emissions || 0).toFixed(0)}g`,
+            })),
+          )
+        }
 
-        const fallbackRoutes = [
-          {
-            mode: "walk",
-            path: [
-              startCoords,
-              [midLat + 0.002, midLng - 0.003] as [number, number],
-              [midLat - 0.001, midLng + 0.002] as [number, number],
-              endCoords,
-            ],
-            color: "#b8d67f",
-          },
-          {
-            mode: "bike",
-            path: [
-              startCoords,
-              [midLat + 0.001, midLng + 0.003] as [number, number],
-              [midLat - 0.002, midLng - 0.002] as [number, number],
-              endCoords,
-            ],
-            color: "#8c9fb8",
-          },
-          {
-            mode: "car",
-            path: [
-              startCoords,
-              [midLat - 0.003, midLng + 0.002] as [number, number],
-              [midLat + 0.002, midLng - 0.001] as [number, number],
-              endCoords,
-            ],
-            color: "#e8675e",
-          },
-        ]
-
-        fallbackRoutes.forEach((route) => {
-          const polyline = L.polyline(route.path, {
-            color: route.color,
-            opacity: selectedMode === route.mode || !selectedMode ? 0.9 : 0.4,
-            weight: selectedMode === route.mode ? 4 : 2,
-          }).addTo(mapRef.current)
-
-          polylinesRef.current.push(polyline)
-        })
+        const allPoints = routesWithScores.flatMap((r) => r?.path || [])
+        if (allPoints.length > 0) {
+          mapRef.current.fitBounds(L.latLngBounds(allPoints), { padding: [50, 50] })
+        }
       }
     }
 
     drawRoutes()
+  }, [routeCoords, selectedMode, optimizationPrefs, onRoutesFetched])
 
-    const startIcon = L.divIcon({
-      className: "custom-marker",
-      html: `<div style="background-color: #b8d67f; width: 20px; height: 20px; border-radius: 50%; border: 2px solid white;"></div>`,
-      iconSize: [20, 20],
-      iconAnchor: [10, 10],
-    })
+  const fetchRoutes = async (startCoords: [number, number], endCoords: [number, number]): Promise<Route[]> => {
+    const routes: Route[] = []
 
-    const startMarker = L.marker(startCoords, { icon: startIcon }).addTo(mapRef.current)
-    startMarker.bindPopup(`<strong>Start</strong><br>${origin}`)
+    const routeConfigs = [
+      { mode: "walk", profile: "foot", speed: 5, costPerKm: 0, emissionsPerKm: 0, color: "#10b981" },
+      { mode: "bike", profile: "bike", speed: 15, costPerKm: 0.1, emissionsPerKm: 0, color: "#3b82f6" },
+      { mode: "bus", profile: "car", speed: 25, costPerKm: 0.15, emissionsPerKm: 89, color: "#f59e0b" },
+      { mode: "train", profile: "car", speed: 60, costPerKm: 0.12, emissionsPerKm: 41, color: "#8b5cf6" },
+      { mode: "car", profile: "car", speed: 40, costPerKm: 0.58, emissionsPerKm: 192, color: "#ef4444" },
+      { mode: "rideshare", profile: "car", speed: 35, costPerKm: 1.2, emissionsPerKm: 96, color: "#ec4899" },
+    ]
 
-    const endIcon = L.divIcon({
-      className: "custom-marker",
-      html: `<div style="background-color: #e8675e; width: 20px; height: 20px; border-radius: 50%; border: 2px solid white;"></div>`,
-      iconSize: [20, 20],
-      iconAnchor: [10, 10],
-    })
+    for (const config of routeConfigs) {
+      try {
+        console.log(`[v0] Fetching ${config.mode} route via API`)
 
-    const endMarker = L.marker(endCoords, { icon: endIcon }).addTo(mapRef.current)
-    endMarker.bindPopup(`<strong>Destination</strong><br>${destination}`)
+        const response = await fetch(
+          `/api/route?profile=${config.profile}&start=${endCoords[1]},${endCoords[0]}&end=${startCoords[1]},${startCoords[0]}`,
+        )
 
-    markersRef.current.push(startMarker, endMarker)
+        if (response.ok) {
+          const data = await response.json()
 
-    const bounds = L.latLngBounds([startCoords, endCoords])
-    mapRef.current.fitBounds(bounds, { padding: [100, 100] })
-  }, [isLoaded, routeCoords, selectedMode, origin, destination, optimizationPrefs])
+          if (data.routes && data.routes.length > 0) {
+            const route = data.routes[0]
+            const coords = route.geometry.coordinates.map((c: number[]) => [c[1], c[0]] as [number, number])
+            const distance = route.distance
+            const duration = route.duration
 
-  const calculateDistance = (coord1: [number, number], coord2: [number, number]) => {
-    const R = 6371 // Earth's radius in km
-    const dLat = ((coord2[0] - coord1[0]) * Math.PI) / 180
-    const dLon = ((coord2[1] - coord1[1]) * Math.PI) / 180
+            console.log(
+              `[v0] Fetched ${config.mode} route: ${coords.length} points, ${(distance / 1000).toFixed(1)}km, ${(duration / 60).toFixed(1)}min`,
+            )
+
+            routes.push({
+              mode: config.mode,
+              path: coords,
+              distance: distance,
+              duration: duration,
+              cost: (distance / 1000) * config.costPerKm,
+              emissions: (distance / 1000) * config.emissionsPerKm,
+              color: config.color,
+            })
+          } else {
+            console.log(`[v0] No valid route found for ${config.mode}`)
+          }
+        }
+      } catch (error) {
+        console.error(`[v0] Error fetching ${config.mode} route:`, error)
+      }
+    }
+
+    if (routes.length === 0) {
+      console.log("[v0] API routing failed, generating estimated routes")
+
+      const straightDistance = calculateDistance(startCoords, endCoords)
+
+      routeConfigs.forEach((config) => {
+        const offset =
+          config.mode === "walk" ? 0.003 : config.mode === "bike" ? -0.003 : config.mode === "car" ? 0.002 : -0.001
+        const midPoint1: [number, number] = [
+          startCoords[0] * 0.7 + endCoords[0] * 0.3 + offset,
+          startCoords[1] * 0.7 + endCoords[1] * 0.3 - offset,
+        ]
+        const midPoint2: [number, number] = [
+          startCoords[0] * 0.3 + endCoords[0] * 0.7 - offset,
+          startCoords[1] * 0.3 + endCoords[1] * 0.7 + offset,
+        ]
+
+        const path: [number, number][] = [startCoords, midPoint1, midPoint2, endCoords]
+
+        const multiplier =
+          config.mode === "walk"
+            ? 1.3
+            : config.mode === "bike"
+              ? 1.25
+              : config.mode === "bus"
+                ? 1.5
+                : config.mode === "train"
+                  ? 1.1
+                  : config.mode === "car"
+                    ? 1.4
+                    : 1.45
+        const estimatedDistance = straightDistance * multiplier
+        const estimatedDuration = (estimatedDistance / config.speed) * 3600
+
+        routes.push({
+          mode: config.mode,
+          path,
+          distance: estimatedDistance * 1000,
+          duration: estimatedDuration,
+          cost: estimatedDistance * config.costPerKm,
+          emissions: estimatedDistance * config.emissionsPerKm,
+          color: config.color,
+        })
+      })
+    }
+
+    return routes
+  }
+
+  useEffect(() => {
+    if (!isTracking || !navigator.geolocation) return
+
+    console.log("[v0] Starting real-time location tracking")
+
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        const { latitude, longitude } = position.coords
+        setRealTimeLocation({ lat: latitude, lng: longitude })
+        console.log("[v0] Location updated:", { latitude, longitude })
+
+        if (mapRef.current && isLoaded) {
+          const userIcon = L.divIcon({
+            className: "custom-marker",
+            html: `<div style="position: relative;">
+              <div style="background-color: #3b82f6; width: 16px; height: 16px; border-radius: 50%; border: 3px solid white; box-shadow: 0 0 10px rgba(59, 130, 246, 0.8); position: relative; z-index: 2;"></div>
+              <div style="position: absolute; top: -4px; left: -4px; background-color: rgba(59, 130, 246, 0.3); width: 24px; height: 24px; border-radius: 50%; animation: pulse 2s infinite;"></div>
+            </div>`,
+            iconSize: [24, 24],
+            iconAnchor: [12, 12],
+          })
+
+          if (userMarkerRef.current) {
+            userMarkerRef.current.remove()
+          }
+
+          userMarkerRef.current = L.marker([latitude, longitude], { icon: userIcon }).addTo(mapRef.current)
+          userMarkerRef.current.bindPopup("<strong>Your Live Location</strong><br>Tracking in real-time")
+
+          mapRef.current.setView([latitude, longitude], mapRef.current.getZoom())
+
+          if (routeCoords) {
+            calculateLiveETA(latitude, longitude)
+          }
+        }
+      },
+      (error) => {
+        console.error("[v0] Real-time tracking error:", error)
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 30000,
+        maximumAge: 0,
+      },
+    )
+
+    return () => {
+      if (watchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(watchIdRef.current)
+        console.log("[v0] Stopped real-time tracking")
+      }
+    }
+  }, [isTracking, isLoaded, routeCoords])
+
+  const calculateLiveETA = (currentLat: number, currentLng: number) => {
+    if (!routeCoords) return
+
+    const distance = calculateDistance(currentLat, currentLng, routeCoords.end[0], routeCoords.end[1])
+
+    const speeds = {
+      walk: 5,
+      bike: 15,
+      bus: 30,
+      train: 50,
+      rideshare: 40,
+      car: 50,
+    }
+
+    const speed = speeds[selectedMode as keyof typeof speeds] || speeds.car
+    const timeInHours = distance / speed
+    const timeInMinutes = Math.round(timeInHours * 60)
+
+    setLiveETA(`${timeInMinutes} min`)
+    console.log("[v0] Live ETA updated:", timeInMinutes, "minutes")
+  }
+
+  const calculateDistance = (lat1: number, lon1: number, lat2?: number, lon2?: number) => {
+    const R = 6371
+    const dLat = (((lat2 || 0) - lat1) * Math.PI) / 180
+    const dLon = (((lon2 || 0) - lon1) * Math.PI) / 180
     const a =
       Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((coord1[0] * Math.PI) / 180) *
-        Math.cos((coord2[0] * Math.PI) / 180) *
+      Math.cos((lat1 * Math.PI) / 180) *
+        Math.cos(((lat2 || 0) * Math.PI) / 180) *
         Math.sin(dLon / 2) *
         Math.sin(dLon / 2)
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
     return R * c
   }
 
+  const toggleTracking = () => {
+    setIsTracking(!isTracking)
+  }
+
+  const toggleBusinessData = () => {
+    setShowBusinessData(!showBusinessData)
+  }
+
+  const fetchBusinessData = async (lat: number, lng: number) => {
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1&extratags=1`,
+      )
+      const data = await response.json()
+
+      if (data.extratags) {
+        const businessInfo = {
+          name: data.name || "Unknown",
+          type: data.type || "Location",
+          phone: data.extratags["contact:phone"] || data.extratags.phone,
+          website: data.extratags["contact:website"] || data.extratags.website,
+          hours: data.extratags.opening_hours,
+          address: data.display_name,
+        }
+
+        return businessInfo
+      }
+    } catch (error) {
+      console.error("[v0] Error fetching business data:", error)
+    }
+    return null
+  }
+
   return (
     <div className="relative w-full h-full">
+      <div className="absolute top-4 right-4 z-20 flex flex-col gap-2">
+        <Button
+          onClick={toggleTracking}
+          size="sm"
+          variant={isTracking ? "default" : "outline"}
+          className="bg-card border-border shadow-lg"
+          title={isTracking ? "Stop live tracking" : "Start live tracking"}
+        >
+          <svg
+            className="w-4 h-4"
+            fill={isTracking ? "currentColor" : "none"}
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={2}
+              d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"
+            />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+          </svg>
+        </Button>
+
+        {isTracking && liveETA && (
+          <Card className="px-3 py-2 bg-card border-border shadow-lg">
+            <div className="text-xs font-semibold text-foreground">ETA: {liveETA}</div>
+          </Card>
+        )}
+
+        <Card className="p-1 bg-card border-border shadow-lg">
+          <div className="flex flex-col gap-1">
+            <Button
+              onClick={toggleBusinessData}
+              size="sm"
+              variant={showBusinessData ? "default" : "ghost"}
+              className="text-xs h-7"
+            >
+              Business Data
+            </Button>
+          </div>
+        </Card>
+      </div>
+
       <div ref={mapContainerRef} className="w-full h-full" />
 
       <div className="absolute top-4 left-4 bg-card/95 backdrop-blur-sm border border-border rounded-lg p-3 max-w-xs z-[1000]">

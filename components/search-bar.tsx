@@ -18,6 +18,12 @@ interface SuggestionResult {
   display_name: string
   lat: string
   lon: string
+  type?: string
+  class?: string
+  icon?: string
+  opening_hours?: string
+  rating?: number
+  real_time_data?: any
 }
 
 export function SearchBar({
@@ -37,6 +43,8 @@ export function SearchBar({
   const destinationDebounceRef = useRef<NodeJS.Timeout>()
   const originRef = useRef<HTMLDivElement>(null)
   const destinationRef = useRef<HTMLDivElement>(null)
+  const [currentLocation, setCurrentLocation] = useState<{ lat: number; lng: number } | null>(null)
+  const [showNearMeOptions, setShowNearMeOptions] = useState(false)
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -65,8 +73,15 @@ export function SearchBar({
     }
 
     try {
+      // Search for places (POIs like Starbucks, restaurants, etc.) AND addresses
       const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`,
+        `https://nominatim.openstreetmap.org/search?` +
+          `format=json&` +
+          `q=${encodeURIComponent(query)}&` +
+          `limit=8&` +
+          `addressdetails=1&` +
+          `extratags=1&` +
+          `namedetails=1`,
         {
           headers: {
             "User-Agent": "GreenPath Navigation App/1.0",
@@ -78,6 +93,7 @@ export function SearchBar({
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
 
       const data = await response.json()
+      console.log("[v0] Search results for:", query, data.slice(0, 3))
 
       if (isOrigin) {
         setOriginSuggestions(data)
@@ -205,6 +221,153 @@ export function SearchBar({
     )
   }
 
+  const handleNearMeSearch = async (category: string) => {
+    if (!currentLocation && navigator.geolocation) {
+      setIsLoadingLocation(true)
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          const { latitude, longitude } = position.coords
+          setCurrentLocation({ lat: latitude, lng: longitude })
+          await searchNearby(latitude, longitude, category)
+          setIsLoadingLocation(false)
+        },
+        (error) => {
+          console.error("[v0] Geolocation error:", error)
+          alert("Unable to get your location. Please enable location access.")
+          setIsLoadingLocation(false)
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 60000 },
+      )
+    } else if (currentLocation) {
+      await searchNearby(currentLocation.lat, currentLocation.lng, category)
+    }
+  }
+
+  const searchNearby = async (lat: number, lng: number, category: string) => {
+    try {
+      // Search for places near the user's location
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?` +
+          `format=json&` +
+          `q=${encodeURIComponent(category)}&` +
+          `lat=${lat}&` +
+          `lon=${lng}&` +
+          `limit=8&` +
+          `addressdetails=1&` +
+          `extratags=1&` +
+          `bounded=1&` +
+          `viewbox=${lng - 0.1},${lat - 0.1},${lng + 0.1},${lat + 0.1}`,
+        {
+          headers: {
+            "User-Agent": "GreenPath Navigation App/1.0",
+            Accept: "application/json",
+          },
+        },
+      )
+
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`)
+
+      const data = await response.json()
+      console.log("[v0] Near me search results for:", category, data.slice(0, 3))
+
+      setDestinationSuggestions(data)
+      setShowDestinationSuggestions(data.length > 0)
+      setShowNearMeOptions(false)
+    } catch (error) {
+      console.error("[v0] Near me search error:", error)
+    }
+  }
+
+  const getPlaceIcon = (suggestion: SuggestionResult) => {
+    const type = suggestion.type?.toLowerCase() || ""
+    const placeClass = suggestion.class?.toLowerCase() || ""
+    const name = suggestion.display_name.toLowerCase()
+
+    // Check for specific business types
+    if (name.includes("starbucks") || name.includes("coffee") || name.includes("cafe")) {
+      return "☕" // Coffee shop
+    }
+    if (
+      name.includes("restaurant") ||
+      name.includes("pizza") ||
+      name.includes("burger") ||
+      (placeClass === "amenity" && type === "restaurant")
+    ) {
+      return "🍴" // Restaurant
+    }
+    if (name.includes("hospital") || (placeClass === "amenity" && type === "hospital")) {
+      return "🏥" // Hospital
+    }
+    if (name.includes("hotel") || (placeClass === "tourism" && type === "hotel")) {
+      return "🏨" // Hotel
+    }
+    if (name.includes("mall") || name.includes("shopping") || placeClass === "shop") {
+      return "🛍️" // Shopping
+    }
+    if (name.includes("airport") || placeClass === "aeroway") {
+      return "✈️" // Airport
+    }
+    if (name.includes("station") || name.includes("metro") || placeClass === "railway") {
+      return "🚉" // Transit
+    }
+    if (name.includes("park") || (placeClass === "leisure" && type === "park")) {
+      return "🌳" // Park
+    }
+    if (name.includes("gym") || name.includes("fitness") || type === "fitness_centre") {
+      return "💪" // Gym
+    }
+    if (name.includes("school") || name.includes("university") || (placeClass === "amenity" && type === "school")) {
+      return "🎓" // Education
+    }
+
+    // Default location pin
+    return "📍"
+  }
+
+  const renderSuggestion = (suggestion: SuggestionResult, isOrigin: boolean, index: number) => {
+    const icon = getPlaceIcon(suggestion)
+
+    const name = suggestion.display_name.split(",")[0]
+    const address = suggestion.display_name.split(",").slice(1).join(",")
+    const type = suggestion.type || suggestion.class
+    const openingHours = suggestion.opening_hours
+    const rating = suggestion.rating
+    const realTimeData = suggestion.real_time_data
+
+    return (
+      <button
+        key={index}
+        onClick={() => handleSelectSuggestion(suggestion, isOrigin)}
+        className="w-full text-left px-3 py-2 hover:bg-accent hover:text-accent-foreground text-sm transition-colors border-b border-border/50 last:border-0"
+      >
+        <div className="flex items-start gap-2">
+          <span className="text-lg flex-shrink-0 mt-0.5">{icon}</span>
+          <div className="flex-1 min-w-0">
+            <div className="text-foreground font-medium truncate">{name}</div>
+            <div className="text-muted-foreground text-xs truncate">{address}</div>
+            {type && <div className="text-muted-foreground text-xs mt-0.5 capitalize">{type.replace("_", " ")}</div>}
+            {openingHours && <div className="text-muted-foreground text-xs mt-0.5">Open: {openingHours}</div>}
+            {rating !== undefined && <div className="text-muted-foreground text-xs mt-0.5">Rating: {rating}</div>}
+            {realTimeData && (
+              <div className="text-muted-foreground text-xs mt-0.5">Real-time Data: {JSON.stringify(realTimeData)}</div>
+            )}
+          </div>
+        </div>
+      </button>
+    )
+  }
+
+  const nearMeCategories = [
+    { label: "Coffee Shops", query: "coffee", icon: "☕" },
+    { label: "Restaurants", query: "restaurant", icon: "🍴" },
+    { label: "Gas Stations", query: "fuel", icon: "⛽" },
+    { label: "Hospitals", query: "hospital", icon: "🏥" },
+    { label: "ATMs", query: "atm", icon: "🏧" },
+    { label: "Pharmacies", query: "pharmacy", icon: "💊" },
+    { label: "Grocery", query: "supermarket", icon: "🛒" },
+    { label: "Hotels", query: "hotel", icon: "🏨" },
+  ]
+
   return (
     <Card className="p-4 bg-card border border-border shadow-sm">
       <div className="flex flex-col gap-3">
@@ -221,36 +384,7 @@ export function SearchBar({
               />
               {showOriginSuggestions && originSuggestions.length > 0 && (
                 <div className="absolute z-50 w-full mt-1 bg-card border border-border rounded-md shadow-lg max-h-60 overflow-y-auto">
-                  {originSuggestions.map((suggestion, index) => (
-                    <button
-                      key={index}
-                      onClick={() => handleSelectSuggestion(suggestion, true)}
-                      className="w-full text-left px-3 py-2 hover:bg-accent hover:text-accent-foreground text-sm transition-colors"
-                    >
-                      <div className="flex items-start gap-2">
-                        <svg
-                          className="w-4 h-4 mt-0.5 flex-shrink-0 text-muted-foreground"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"
-                          />
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"
-                          />
-                        </svg>
-                        <span className="text-foreground">{suggestion.display_name}</span>
-                      </div>
-                    </button>
-                  ))}
+                  {originSuggestions.map((suggestion, index) => renderSuggestion(suggestion, true, index))}
                 </div>
               )}
             </div>
@@ -293,7 +427,7 @@ export function SearchBar({
             <div className="w-3 h-3 rounded-sm bg-destructive flex-shrink-0" />
             <div className="flex-1 relative" ref={destinationRef}>
               <Input
-                placeholder="Where to?"
+                placeholder="Where to? (e.g., Starbucks, restaurants, addresses)"
                 value={destination}
                 onChange={(e) => handleDestinationChange(e.target.value)}
                 onFocus={() => destination.length >= 3 && setShowDestinationSuggestions(true)}
@@ -301,40 +435,48 @@ export function SearchBar({
               />
               {showDestinationSuggestions && destinationSuggestions.length > 0 && (
                 <div className="absolute z-50 w-full mt-1 bg-card border border-border rounded-md shadow-lg max-h-60 overflow-y-auto">
-                  {destinationSuggestions.map((suggestion, index) => (
-                    <button
-                      key={index}
-                      onClick={() => handleSelectSuggestion(suggestion, false)}
-                      className="w-full text-left px-3 py-2 hover:bg-accent hover:text-accent-foreground text-sm transition-colors"
-                    >
-                      <div className="flex items-start gap-2">
-                        <svg
-                          className="w-4 h-4 mt-0.5 flex-shrink-0 text-muted-foreground"
-                          fill="none"
-                          stroke="currentColor"
-                          viewBox="0 0 24 24"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"
-                          />
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"
-                          />
-                        </svg>
-                        <span className="text-foreground">{suggestion.display_name}</span>
-                      </div>
-                    </button>
-                  ))}
+                  {destinationSuggestions.map((suggestion, index) => renderSuggestion(suggestion, false, index))}
                 </div>
               )}
             </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowNearMeOptions(!showNearMeOptions)}
+              className="whitespace-nowrap bg-transparent flex-shrink-0"
+              title="Search nearby places"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                />
+              </svg>
+            </Button>
           </div>
+
+          {showNearMeOptions && (
+            <Card className="p-3 bg-secondary border-border">
+              <h3 className="text-xs font-semibold text-foreground mb-2">Find places near you:</h3>
+              <div className="grid grid-cols-2 gap-2">
+                {nearMeCategories.map((category) => (
+                  <Button
+                    key={category.query}
+                    variant="outline"
+                    size="sm"
+                    onClick={() => handleNearMeSearch(category.query)}
+                    disabled={isLoadingLocation}
+                    className="justify-start text-xs h-8"
+                  >
+                    <span className="mr-1.5">{category.icon}</span>
+                    {category.label}
+                  </Button>
+                ))}
+              </div>
+            </Card>
+          )}
 
           <Button
             onClick={onSearch}
