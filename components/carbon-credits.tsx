@@ -4,10 +4,22 @@ import { useState, useEffect } from "react"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+  DialogTrigger,
+  DialogClose,
+} from "@/components/ui/dialog"
 import { calculateCarbonCredits } from "@/lib/emissions-calculator"
 
 export function CarbonCredits() {
   const [credits, setCredits] = useState(0)
+  const [isCatalogOpen, setIsCatalogOpen] = useState(false)
+  const [redeemMessage, setRedeemMessage] = useState<string | null>(null)
   const [level, setLevel] = useState(1)
   const [nextLevelCredits, setNextLevelCredits] = useState(100)
   const [totalSavedGrams, setTotalSavedGrams] = useState(0)
@@ -46,6 +58,15 @@ export function CarbonCredits() {
     { name: "Carbon Champion", credits: 500, unlocked: credits >= 500, icon: "🏆" },
     { name: "Planet Protector", credits: 1000, unlocked: credits >= 1000, icon: "🌍" },
   ]
+
+  const rewards = [
+    { id: "bike", name: "Bike Share Discount", cost: 50, description: "Discount on local bike share." },
+    { id: "transit", name: "Transit Pass", cost: 100, description: "1-day transit pass." },
+    { id: "coffee", name: "Plant-Based Meal Voucher", cost: 75, description: "Voucher for a plant-based meal." },
+    { id: "tree", name: "Tree Planting Donation", cost: 150, description: "Fund a tree planting project." },
+  ]
+
+  // Dialog open state is controlled by Radix Dialog via `isCatalogOpen`.
 
   return (
     <Card className="p-4 space-y-4">
@@ -131,9 +152,81 @@ export function CarbonCredits() {
         </div>
       </div>
 
-      <Button variant="outline" className="w-full bg-transparent">
-        View Rewards Catalog
-      </Button>
+      <Dialog open={isCatalogOpen} onOpenChange={setIsCatalogOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Rewards Catalog</DialogTitle>
+            <DialogDescription>
+              Redeem your carbon credits for sustainable rewards. Each reward costs a number of credits.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="mt-4 space-y-4">
+            {/* Rewards list tied to credits */}
+            {rewards.map((reward) => (
+              <div key={reward.id} className="flex items-center justify-between p-3 rounded-lg border">
+                <div>
+                  <div className="font-medium">{reward.name}</div>
+                  <div className="text-xs text-muted-foreground">{reward.description}</div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="text-sm text-muted-foreground">{reward.cost} credits</div>
+                  <Button
+                    size="sm"
+                    disabled={credits < reward.cost}
+                    onClick={() => {
+                      const newCredits = Math.max(0, credits - reward.cost)
+                      setCredits(newCredits)
+                      calculateLevel(newCredits)
+                      localStorage.setItem("carbon_credits", String(newCredits))
+
+                      // record redeemed rewards
+                      const redeemed = JSON.parse(localStorage.getItem("redeemed_rewards") || "[]")
+                      redeemed.push({ id: reward.id, name: reward.name, cost: reward.cost, redeemedAt: new Date().toISOString() })
+                      localStorage.setItem("redeemed_rewards", JSON.stringify(redeemed))
+
+                      // inline non-blocking confirmation
+                      const msg = `Redeemed ${reward.name} for ${reward.cost} credits.`
+                      setRedeemMessage(msg)
+                      console.log(msg)
+                      setTimeout(() => setRedeemMessage(null), 4500)
+                    }}
+                  >
+                    Redeem
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Inline confirmation message */}
+          {redeemMessage && <div className="mt-3 text-sm text-success">{redeemMessage}</div>}
+
+          <DialogFooter className="mt-4">
+            <DialogClose asChild>
+              <Button variant="outline" className="w-full">Close</Button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+
+        {/* Trigger button shown in the card */}
+        <DialogTrigger asChild>
+          <Button
+            variant="outline"
+            className="w-full bg-transparent"
+            onClick={() => {
+              setIsCatalogOpen(true)
+              // small console indication for debugging
+              console.log('Opening rewards catalog')
+            }}
+          >
+            View Rewards Catalog
+          </Button>
+        </DialogTrigger>
+
+        {/* Dialog trigger is above; dialog content is rendered via Radix portal */}
+      </Dialog>
+      
     </Card>
   )
 }
